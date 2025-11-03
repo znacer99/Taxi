@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RukoGo - Passenger</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+        .map-container { height: 400px; width: 100%; border-radius: 12px; overflow: hidden; }
+        .btn-primary { background: #2563eb; color: white; padding: 12px 24px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; width: 100%; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-danger { background: #dc2626; color: white; padding: 12px 24px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; }
+        .btn-danger:hover { background: #b91c1c; }
+        .btn-secondary { background: #6b7280; color: white; padding: 12px 24px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; }
+        .status-badge { padding: 8px 16px; border-radius: 20px; font-weight: 600; display: inline-block; }
+        .status-requested { background: #fef3c7; color: #92400e; }
+        .status-assigned { background: #dbeafe; color: #1e40af; }
+        .status-accepted { background: #d1fae5; color: #065f46; }
+        .status-in_progress { background: #e0e7ff; color: #3730a3; }
+        .status-completed { background: #dcfce7; color: #166534; }
+        .status-cancelled { background: #fee2e2; color: #991b1b; }
+        input, select { width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 16px; }
+        input:focus { outline: none; border-color: #2563eb; }
+        .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 16px; }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const API_BASE = 'http://127.0.0.1:8000/api';
+        const WS_BASE = 'ws://127.0.0.1:8000/ws/ride';
+
+        // Main App Component
+        function PassengerApp() {
+            const [screen, setScreen] = useState(localStorage.getItem('passenger_token') ? 'home' : 'auth');
+            const [authMode, setAuthMode] = useState('login');
+            const [token, setToken] = useState(localStorage.getItem('passenger_token'));
+            const [user, setUser] = useState(null);
+            const [profile, setProfile] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [success, setSuccess] = useState('');
+            const [currentLocation, setCurrentLocation] = useState(null);
+            const [activeRide, setActiveRide] = useState(null);
+            const [rideHistory, setRideHistory] = useState([]);
+
+            useEffect(() => {
+                if (token) {
+                    loadProfile();
+                    checkActiveRide();
+                    loadRideHistory();
+                }
+            }, [token]);
+
+            useEffect(() => {
+                const savedToken = localStorage.getItem('passenger_token');
+                if (savedToken) {
+                    setToken(savedToken);
+                }
+            }, []);
+
+            useEffect(() => {
+                if ('geolocation' in navigator) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            setCurrentLocation({
+                                lat: position.coords.latitude,
+                                lng: position.coords.longitude
+                            });
+                        },
+                        (err) => console.error('Location error:', err)
+                    );
+                }
+            }, []);
+
+            const apiCall = async (endpoint, method = 'GET', body = null) => {
+                const storedToken = token || localStorage.getItem('passenger_token');
+
+                const headers = { 'Content-Type': 'application/json' };
+                if (storedToken) {
+                    console.log('API Call Headers:', {...headers, Authorization: `Bearer ${storedToken}` });
+                    headers['Authorization'] = `Bearer ${storedToken}`;
+                } else {
+                    console.warn('No token found!');
+                }
+
+                const options = { method, headers };
+                if (body) options.body = JSON.stringify(body);
+
+                const response = await fetch(`${API_BASE}${endpoint}`, options);
+                let data;
+                try {
+                    data = await response.json();
+                } catch {
+                    throw new Error('Invalid JSON response');
+                }
+                
+                // Handle token expiry
+                if (response.status === 401) {
+                    setToken(null);
+                    setScreen('auth');
+                    throw new Error('Session expired. Please login again.');
+                }
+
+                // Handle all non-OK responses properly
+                if (!response.ok) { 
+                    throw new Error(data.message || 'Request failed with status ${response.status}');
+                }
+
+                return data;
+            };
+
+            const handleAuth = async (formData) => {
+                setLoading(true);
+                setError('');
+                try {
+                    if (authMode === 'login') {
+                        const data = await apiCall('/token/', 'POST', {
+                            username: formData.username,
+                            password: formData.password
+                        });
+                        localStorage.setItem('passenger_token', data.access);
+                        setToken(data.access);
+                        await loadProfile();
+                        setScreen('home');
+                        setSuccess('Login successful!');
+                    } else {
+                        await apiCall('/register/passenger/', 'POST', formData);
+                        setSuccess('Registration successful! Please login.');
+                        setAuthMode('login');
+                    }
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const loadProfile = async () => {
+                const storedToken = token || localStorage.getItem('passenger_token');
+                console.log('Loading profile with token:', storedToken, 'API_BASE:', API_BASE);
+
+                if (!storedToken) {
+                    console.warn('No token available for loadProfile');
+                    setScreen('auth');
+                    return;
+                }
+
+                try {
+                    const data = await apiCall('/passengers/me/');
+                    console.log('Profile API response:', data);
+                    const profileData = data.data || data;
+                    setProfile(profileData);
+                    setUser(profileData.user);
+                } catch (err) {
+                    console.error('Profile load error:', err);
+                }
+            };
+
+            const checkActiveRide = async () => {
+                try {
+                    const data = await apiCall('/rides/');
+                    const ridesArray = Array.isArray(data) ? data : (data.data || []);
+                    const active = ridesArray.find(r =>
+
+                        !['completed', 'cancelled'].includes(r.status.toLowerCase())
+                    );
+                    console.log('Active Ride Found:', active);
+                    if (active) setActiveRide(active);
+                } catch (err) {
+                    console.error('Check ride error:', err);
+                }
+            };
+
+            const loadRideHistory = async () => {
+                try {
+                    const data = await apiCall('/rides/');
+                    const ridesArray = Array.isArray(data) ? data : (data.data || []);
+                    console.log('Ride History Loaded:', ridesArray);
+                    setRideHistory(ridesArray);
+                } catch (err) {
+                    console.error('History load error:', err);
+                }
+            };
+
+            const logout = () => {
+                setToken(null);
+                setUser(null);
+                setProfile(null);
+                setActiveRide(null);
+                setScreen('auth');
+            };
+
+            if (screen === 'auth') {
+                return <AuthScreen 
+                    mode={authMode} 
+                    setMode={setAuthMode}
+                    onSubmit={handleAuth}
+                    loading={loading}
+                    error={error}
+                    success={success}
+                />;
+            }
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    <Header user={user} onLogout={logout} />
+                    {screen === 'home' && (
+                        <HomeScreen 
+                            currentLocation={currentLocation}
+                            activeRide={activeRide}
+                            onNavigate={setScreen}
+                        />
+                    )}
+                    {screen === 'request' && (
+                        <RequestRideScreen 
+                            currentLocation={currentLocation}
+                            token={token}
+                            apiCall={apiCall}
+                            onSuccess={(ride) => {
+                                setActiveRide(ride);
+                                setScreen('ride');
+                            }}
+                        />
+                    )}
+                    {screen === 'ride' && (
+                        <>
+                        {console.log('🔍 activeRide value:', activeRide)}
+                        <ActiveRideScreen 
+                        ride={activeRide}
+                        token={token}
+                        apiCall={apiCall}
+                        onUpdate={setActiveRide}
+                        onComplete={() => {
+                            setActiveRide(null);
+                            loadRideHistory();
+                            setScreen('home');
+                        }}
+                    />
+                </>
+            )}
+                    {screen === 'history' && (
+                        <RideHistoryScreen rides={rideHistory} />
+                    )}
+                    {screen === 'profile' && (
+                        <ProfileScreen 
+                            profile={profile}
+                            token={token}
+                            apiCall={apiCall}
+                            onUpdate={setProfile}
+                        />
+                    )}
+                    <BottomNav screen={screen} setScreen={setScreen} />
+                </div>
+            );
+        }
+
+        // Auth Screen
+        function AuthScreen({ mode, setMode, onSubmit, loading, error, success }) {
+            const [formData, setFormData] = useState({
+                username: '', email: '', password: '', phone_number: ''
+            });
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onSubmit(formData);
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                    <div className="card max-w-md w-full">
+                        <h1 className="text-3xl font-bold text-center mb-6 text-blue-600">
+                            🚗 RukoGo
+                        </h1>
+                        <div className="flex gap-2 mb-6">
+                            <button 
+                                onClick={() => setMode('login')}
+                                className={`flex-1 py-2 rounded-lg font-semibold ${mode === 'login' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+                            >
+                                Login
+                            </button>
+                            <button 
+                                onClick={() => setMode('register')}
+                                className={`flex-1 py-2 rounded-lg font-semibold ${mode === 'register' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+                            >
+                                Register
+                            </button>
+                        </div>
+
+                        {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4">{error}</div>}
+                        {success && <div className="bg-green-100 text-green-700 p-3 rounded-lg mb-4">{success}</div>}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <input 
+                                type="text" 
+                                placeholder="Username"
+                                value={formData.username}
+                                onChange={(e) => setFormData({...formData, username: e.target.value})}
+                                required
+                            />
+                            {mode === 'register' && (
+                                <>
+                                    <input 
+                                        type="email" 
+                                        placeholder="Email"
+                                        value={formData.email}
+                                        onChange={(e) => setFormData({...formData, email: e.target.value})}
+                                        required
+                                    />
+                                    <input 
+                                        type="tel" 
+                                        placeholder="Phone Number"
+                                        value={formData.phone_number}
+                                        onChange={(e) => setFormData({...formData, phone_number: e.target.value})}
+                                        required
+                                    />
+                                </>
+                            )}
+                            <input 
+                                type="password" 
+                                placeholder="Password"
+                                value={formData.password}
+                                onChange={(e) => setFormData({...formData, password: e.target.value})}
+                                required
+                            />
+                            <button type="submit" className="btn-primary" disabled={loading}>
+                                {loading ? 'Please wait...' : (mode === 'login' ? 'Login' : 'Register')}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // Header Component
+        function Header({ user, onLogout }) {
+            return (
+                <div className="bg-blue-600 text-white p-4 shadow-lg">
+                    <div className="max-w-4xl mx-auto flex justify-between items-center">
+                        <h1 className="text-xl font-bold">🚗 RideShare</h1>
+                        <div className="flex items-center gap-4">
+                            <span className="text-sm">Hi, {user?.username || 'Passenger'}</span>
+                            <button onClick={onLogout} className="text-sm bg-white text-blue-600 px-3 py-1 rounded-lg font-semibold">
+                                Logout
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Home Screen
+        function HomeScreen({ currentLocation, activeRide, onNavigate }) {
+            const mapRef = useRef(null);
+            const mapInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (currentLocation && mapRef.current && !mapInstanceRef.current) {
+                    const map = L.map(mapRef.current).setView([currentLocation.lat, currentLocation.lng], 13);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                    L.marker([currentLocation.lat, currentLocation.lng])
+                        .addTo(map)
+                        .bindPopup('You are here')
+                        .openPopup();
+                    mapInstanceRef.current = map;
+                }
+            }, [currentLocation]);
+
+            return (
+                <div className="max-w-4xl mx-auto p-4 space-y-4">
+                    {activeRide && (
+                        <div className="card bg-blue-50 border-2 border-blue-600">
+                            <div className="flex justify-between items-center">
+                                <div>
+                                    <h3 className="font-bold text-lg">Active Ride</h3>
+                                    <p className="text-sm text-gray-600">Status: {activeRide.status}</p>
+                                </div>
+                                <button 
+                                    onClick={() => onNavigate('ride')}
+                                    className="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold"
+                                >
+                                    View Ride
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="card">
+                        <h2 className="text-xl font-bold mb-4">Your Location</h2>
+                        {currentLocation ? (
+                            <>
+                                <div className="map-container" ref={mapRef}></div>
+                                <p className="text-sm text-gray-600 mt-2">
+                                    📍 {currentLocation.lat.toFixed(6)}, {currentLocation.lng.toFixed(6)}
+                                </p>
+                            </>
+                        ) : (
+                            <p className="text-gray-600">Getting your location...</p>
+                        )}
+                    </div>
+
+                    <button 
+                        onClick={() => onNavigate('request')}
+                        className="btn-primary text-lg"
+                        disabled={!currentLocation || activeRide}
+                    >
+                        {activeRide ? 'Ride in Progress' : '🚗 Request a Ride'}
+                    </button>
+                </div>
+            );
+        }
+
+        // Request Ride Screen
+        function RequestRideScreen({ currentLocation, token, apiCall, onSuccess }) {
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [formData, setFormData] = useState({
+                pickup_location: '',
+                pickup_lat: currentLocation?.lat || '',
+                pickup_lng: currentLocation?.lng || '',
+                dropoff_location: '',
+                dropoff_lat: '',
+                dropoff_lng: ''
+            });
+
+            useEffect(() => {
+                if (currentLocation) {
+                    setFormData(prev => ({
+                        ...prev,
+                        pickup_location: `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}`,
+                        pickup_lat: currentLocation.lat,
+                        pickup_lng: currentLocation.lng
+                    }));
+                }
+            }, [currentLocation]);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError('');
+
+                try {
+                    // fallback to token from localStorage if prop is missing
+                    const accessToken = token || localStorage.getItem('passenger_token');
+                    if (!accessToken) throw new Error('You must be logged in to request a ride.');
+
+                    const data = await apiCall('/rides/', 'POST', {
+                        pickup_location: formData.pickup_location,
+                        pickup_lat: parseFloat(formData.pickup_lat) || 0,
+                        pickup_lng: parseFloat(formData.pickup_lng) || 0,
+                        dropoff_location: formData.dropoff_location,
+                        dropoff_lat: parseFloat(formData.dropoff_lat) || 0,
+                        dropoff_lng: parseFloat(formData.dropoff_lng) || 0
+                    });
+
+                    if (!data.success) throw new Error(data.message || 'Ride request failed'); 
+                    
+                    onSuccess(data.data);
+                } catch (err) {
+                    console.error('Request ride error:', err);
+                    setError(err.message || 'Something went wrong.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto p-4">
+                    <div className="card">
+                        <h2 className="text-2xl font-bold mb-6">Request a Ride</h2>
+                        
+                        {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4">{error}</div>}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-semibold mb-2">Pickup Location</label>
+                                <input 
+                                    type="text"
+                                    value={formData.pickup_location}
+                                    onChange={(e) => setFormData({...formData, pickup_location: e.target.value})}
+                                    required
+                                />
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <input 
+                                        type="number" 
+                                        step="any"
+                                        placeholder="Latitude"
+                                        value={formData.pickup_lat}
+                                        onChange={(e) => setFormData({...formData, pickup_lat: e.target.value})}
+                                        required
+                                    />
+                                    <input 
+                                        type="number" 
+                                        step="any"
+                                        placeholder="Longitude"
+                                        value={formData.pickup_lng}
+                                        onChange={(e) => setFormData({...formData, pickup_lng: e.target.value})}
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-semibold mb-2">Dropoff Location</label>
+                                <input 
+                                    type="text"
+                                    placeholder="Enter destination"
+                                    value={formData.dropoff_location}
+                                    onChange={(e) => setFormData({...formData, dropoff_location: e.target.value})}
+                                    required
+                                />
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <input 
+                                        type="number" 
+                                        step="any"
+                                        placeholder="Latitude"
+                                        value={formData.dropoff_lat}
+                                        onChange={(e) => setFormData({...formData, dropoff_lat: e.target.value})}
+                                        required
+                                    />
+                                    <input 
+                                        type="number" 
+                                        step="any"
+                                        placeholder="Longitude"
+                                        value={formData.dropoff_lng}
+                                        onChange={(e) => setFormData({...formData, dropoff_lng: e.target.value})}
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            <button type="submit" className="btn-primary" disabled={loading}>
+                                {loading ? 'Requesting...' : 'Request Ride'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // Active Ride Screen
+        function ActiveRideScreen({ ride, token, apiCall, onUpdate, onComplete }) {
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [rideDetails, setRideDetails] = useState(ride);
+            const wsRef = useRef(null);
+            const mapRef = useRef(null);
+            const mapInstanceRef = useRef(null);
+
+            // Fetch full ride details if coordinates are missing
+            useEffect(() => {
+                const fetchRideDetails = async () => {
+                    console.log('Fetching ride details, ride:', ride);
+                    if (ride && ride.id) {
+                        try {
+                            // Always pull token from memory or localStorage
+                            const storedToken = token || localStorage.getItem("passenger_token");
+                            if (!storedToken) throw new Error("Missing token");
+
+                            // Call API with token included
+                            const data = await apiCall(`/rides/${ride.id}/`, "GET", null, storedToken);
+                            console.log('Fetched ride data:', data);
+
+                            setRideDetails(data.data || data);
+                            console.log('Set rideDetails to:', data.data || data);
+                        } catch (err) {
+                            console.error("Fetch ride error:", err);
+                            // fallback to local ride info
+                            setRideDetails(ride);
+
+                            // optional: handle expired session
+                            if (err.message?.includes("Session expired") || err.status === 401) {
+                                alert("Session expired. Please log in again.");
+                                localStorage.removeItem("passenger_token");
+                                setScreen("auth");
+                            }
+                        }
+                    } else {
+                        console.log('No ride or ride.id');
+                    }
+                };
+                fetchRideDetails();
+            }, [ride?.id, token]);
+
+            useEffect(() => {
+                if (rideDetails && rideDetails.pickup_location && rideDetails.dropoff_location && mapRef.current && !mapInstanceRef.current) {
+                    // Extract coordinates from location strings if needed
+                    let pickupLat, pickupLng, dropoffLat, dropoffLng;
+                    
+                    // Try to parse coordinates from location strings
+                    const pickupMatch = rideDetails.pickup_location.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+                    const dropoffMatch = rideDetails.dropoff_location.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+                    
+                    if (pickupMatch) {
+                        pickupLat = parseFloat(pickupMatch[1]);
+                        pickupLng = parseFloat(pickupMatch[2]);
+                    }
+                    if (dropoffMatch) {
+                        dropoffLat = parseFloat(dropoffMatch[1]);
+                        dropoffLng = parseFloat(dropoffMatch[2]);
+                    }
+
+                    if (pickupLat && pickupLng && dropoffLat && dropoffLng) {
+                        const map = L.map(mapRef.current).setView([pickupLat, pickupLng], 12);
+                        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                        
+                        L.marker([pickupLat, pickupLng])
+                            .addTo(map)
+                            .bindPopup('🟢 Pickup')
+                            .openPopup();
+                        
+                        L.marker([dropoffLat, dropoffLng])
+                            .addTo(map)
+                            .bindPopup('🔴 Dropoff');
+
+                        // Fit map to show both markers
+                        map.fitBounds([[pickupLat, pickupLng], [dropoffLat, dropoffLng]], { padding: [50, 50] });
+
+                        mapInstanceRef.current = map;
+                    }
+                }
+            }, [rideDetails]);
+
+            useEffect(() => {
+                if (!rideDetails || !rideDetails.id) return;
+
+                    const wsToken = token || localStorage.getItem('passenger_token');
+                    const ws = new WebSocket(`${WS_BASE}/${rideDetails.id}/?token=${wsToken}`);
+                    wsRef.current = ws;
+                    
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        console.log('WebSocket update:', data);
+                        
+                        setRideDetails(prev => ({ ...prev, ...data }));
+                        onUpdate(prev => ({ ...prev, ...data }));
+                        
+                        if (['completed', 'cancelled'].includes(data.status)) {
+                            setTimeout(() => {
+                                onComplete();
+                            }, 2000);
+                        }
+                    };
+
+                    ws.onerror = (err) => console.error('WebSocket error:', err);
+
+                    return () => {
+                        console.log('Closing WebSocket...');
+                        ws.close();
+                        wsRef.current = null;
+                    };
+                
+                }, [rideDetails?.id, token]);
+
+            const cancelRide = async () => {
+                if (!confirm('Are you sure you want to cancel this ride?')) return;
+                
+                setLoading(true);
+                setError('');
+                try {
+                    await apiCall(`/rides/${rideDetails.id}/cancel_ride/`, 'POST');
+                    onComplete();
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (!rideDetails) return <div className="p-4">Loading ride details...</div>;
+
+            const statusText = {
+                'requested': 'Waiting for driver...',
+                'assigned': 'Driver assigned!',
+                'accepted': 'Driver is on the way',
+                'in_progress': 'Ride in progress',
+                'completed': 'Ride completed',
+                'cancelled': 'Ride cancelled'
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto p-4 space-y-4">
+                    <div className="card">
+                        <div className="flex justify-between items-start mb-4">
+                            <div>
+                                <h2 className="text-2xl font-bold">Active Ride</h2>
+                                <span className={`status-badge status-${rideDetails.status.toLowerCase()} mt-2`}>
+                                    {statusText[rideDetails.status.toLowerCase()] || rideDetails.status}
+                                </span>
+                            </div>
+                            <div className="text-right text-sm text-gray-600">
+                                <p>Ride #{rideDetails.id}</p>
+                            </div>
+                        </div>
+
+                        <div className="map-container" ref={mapRef}></div>
+
+                        <div className="mt-4 space-y-2">
+                            <div className="flex items-start gap-2">
+                                <span className="text-green-600 font-bold">🟢</span>
+                                <div>
+                                    <p className="font-semibold">Pickup</p>
+                                    <p className="text-sm text-gray-600">{rideDetails.pickup_location}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-start gap-2">
+                                <span className="text-red-600 font-bold">🔴</span>
+                                <div>
+                                    <p className="font-semibold">Dropoff</p>
+                                    <p className="text-sm text-gray-600">{rideDetails.dropoff_location}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {rideDetails.driver && (
+                            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+                                <h3 className="font-bold mb-2">Driver Details</h3>
+                                <p className="text-sm"><strong>Name:</strong> {rideDetails.driver.user.username}</p>
+                                <p className="text-sm"><strong>Car:</strong> {rideDetails.driver.car_model}</p>
+                                <p className="text-sm"><strong>Plate:</strong> {rideDetails.driver.car_plate}</p>
+                            </div>
+                        )}
+
+                        {rideDetails.fare && (
+                            <div className="mt-4 p-4 bg-green-50 rounded-lg">
+                                <h3 className="font-bold text-xl">Fare: ${rideDetails.fare}</h3>
+                            </div>
+                        )}
+
+                        {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mt-4">{error}</div>}
+
+                        {!['completed', 'cancelled'].includes(rideDetails.status.toLowerCase()) && (
+                            <button 
+                                onClick={cancelRide}
+                                className="btn-danger mt-4 w-full"
+                                disabled={loading}
+                            >
+                                {loading ? 'Cancelling...' : 'Cancel Ride'}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // Ride History Screen
+        function RideHistoryScreen({ rides }) {
+            return (
+                <div className="max-w-4xl mx-auto p-4">
+                    <h2 className="text-2xl font-bold mb-4">Ride History</h2>
+                    {rides.length === 0 ? (
+                        <div className="card text-center text-gray-600">
+                            <p>No rides yet</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {rides.map(ride => (
+                                <div key={ride.id} className="card">
+                                    <div className="flex justify-between items-start">
+                                        <div className="flex-1">
+                                            <p className="font-semibold">
+                                                {ride.pickup_location} → {ride.dropoff_location}
+                                            </p>
+                                            <p className="text-sm text-gray-600">
+                                                {new Date(ride.requested_at).toLocaleDateString()}
+                                            </p>
+                                            <span className={`status-badge status-${ride.status.toLowerCase()} mt-2 text-xs`}>
+                                                {ride.status}
+                                            </span>
+                                        </div>
+                                        {ride.fare && (
+                                            <div className="text-right">
+                                                <p className="text-lg font-bold text-green-600">${ride.fare}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Profile Screen
+        function ProfileScreen({ profile, token, apiCall, onUpdate }) {
+            const [editing, setEditing] = useState(false);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [phoneNumber, setPhoneNumber] = useState(profile?.phone_number || '');
+
+            const handleSave = async () => {
+                setLoading(true);
+                setError('');
+                try {
+                    const data = await apiCall('/passengers/me/', 'PUT', { phone_number: phoneNumber });
+                    onUpdate(data.data);
+                    setEditing(false);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (!profile) return <div className="p-4">Loading profile...</div>;
+
+            return (
+                <div className="max-w-4xl mx-auto p-4">
+                    <div className="card">
+                        <h2 className="text-2xl font-bold mb-6">Profile</h2>
+                        
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-600">Username</label>
+                                <p className="text-lg">{profile.user.username}</p>
+                            </div>
+                            
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-600">Email</label>
+                                <p className="text-lg">{profile.user.email}</p>
+                            </div>
+                            
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-600 mb-2">Phone Number</label>
+                                {editing ? (
+                                    <input 
+                                        type="tel"
+                                        value={phoneNumber}
+                                        onChange={(e) => setPhoneNumber(e.target.value)}
+                                    />
+                                ) : (
+                                    <p className="text-lg">{profile.phone_number}</p>
+                                )}
+                            </div>
+
+                            {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg">{error}</div>}
+
+                            {editing ? (
+                                <div className="flex gap-2">
+                                    <button 
+                                        onClick={handleSave}
+                                        className="btn-primary flex-1"
+                                        disabled={loading}
+                                    >
+                                        {loading ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button 
+                                        onClick={() => {
+                                            setEditing(false);
+                                            setPhoneNumber(profile.phone_number);
+                                        }}
+                                        className="btn-secondary flex-1"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            ) : (
+                                <button 
+                                    onClick={() => setEditing(true)}
+                                    className="btn-primary"
+                                >
+                                    Edit Phone Number
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Bottom Navigation
+        function BottomNav({ screen, setScreen }) {
+            const navItems = [
+                { id: 'home', label: 'Home', icon: '🏠' },
+                { id: 'history', label: 'History', icon: '📋' },
+                { id: 'profile', label: 'Profile', icon: '👤' }
+            ];
+
+            return (
+                <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+                    <div className="max-w-4xl mx-auto flex justify-around">
+                        {navItems.map(item => (
+                            <button
+                                key={item.id}
+                                onClick={() => setScreen(item.id)}
+                                className={`flex-1 py-3 text-center ${
+                                    screen === item.id 
+                                        ? 'text-blue-600 font-semibold' 
+                                        : 'text-gray-500'
+                                }`}
+                            >
+                                <div className="text-2xl">{item.icon}</div>
+                                <div className="text-xs mt-1">{item.label}</div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<PassengerApp />);
+        // ReactDOM.render(<PassengerApp />, document.getElementById('root'));
+    </script>
+</body>
+</html>
