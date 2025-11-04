@@ -414,6 +414,15 @@ class RideViewSet(viewsets.ModelViewSet):
             ride.driver.is_available = True
             ride.driver.save()
 
+            channel_layer = get_channel_layer()
+            async_to_sync(channel_layer.group_send)(
+                f"driver_{ride.driver.id}",
+                {
+                    "type": "ride_update",
+                    "ride": RideSerializer(ride).data
+                }
+            )
+
         send_websocket_update(
             ride.id,
             'ride_cancelled',

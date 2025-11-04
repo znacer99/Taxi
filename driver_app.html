@@ -82,8 +82,17 @@
                 ws.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     console.log('Driver WS received:', data); // Debug line
-                    if (data.type === "ride_update") {
-                        setActiveRide(data.ride);
+
+                    if (data.type === "ride_update" && data.ride) {
+                        const status = data.ride.status.toLowerCase();
+
+                        // Clear if cancelled/completed
+                        if (status && !['completed', 'cancelled'].includes(status)) {
+                                setActiveRide(data.ride);
+                        } else {
+                            setActiveRide(null);
+                            loadEarnings();
+                        }
                         //fetchRides();
                     }
                 };
@@ -109,8 +118,10 @@
             useEffect(() => {
                 if (activeRide && screen !== 'ride') {
                     setScreen('ride');
+                } else if (!activeRide && screen === 'ride') {
+                    setScreen('dashboard');
                 }
-            }, [activeRide]);
+            }, [activeRide, screen]);
 
             useEffect(() => {
                 if ('geolocation' in navigator) {
@@ -127,28 +138,29 @@
             }, []);
 
             // Update location to backend when available and location changes
-            // useEffect(() => {
-                //const storedToken = token || localStorage.getItem('access_token');
-                //if (!storedToken) return;
+            useEffect(() => {
+                const storedToken = token || localStorage.getItem('access_token');
+                if (!storedToken) return;
 
-                //if (isAvailable && currentLocation) {
-                    //const updateLocationInterval = () => updateLocation(storedToken);
+                if (isAvailable && currentLocation) {
+                    const updateLocationInterval = () => updateLocation(storedToken);
                     
-                    // run first update immediately
-                    //updateLocationInterval();
+                    //run first update immediately
+                    updateLocationInterval();
                     
                     // clear old interval
-                    //clearInterval(locationIntervalRef.current);
+                    clearInterval(locationIntervalRef.current);
 
                     // start new interval
-                    //locationIntervalRef.current = setInterval(updateLocationInterval, 30000);
-                //} else {
+                    locationIntervalRef.current = setInterval(updateLocationInterval, 10000);
+                } else {
                     // clear interval if unavailable or location not set
-                    //clearInterval(locationIntervalRef.current);
-                //}
+                    clearInterval(locationIntervalRef.current);
+                }
 
-                //return () => clearInterval(locationIntervalRef.current);
-            //}, [isAvailable, currentLocation, token]);
+                return () => clearInterval(locationIntervalRef.current);
+            }, [isAvailable, currentLocation, token]);
+
             const apiCall = async (endpoint, method = 'GET', body = null, authtoken = null) => {
                 const storedToken = authtoken || token || localStorage.getItem('access_token'); // <— fallback here
                 
@@ -204,7 +216,7 @@
                         latitude: currentLocation.lat,
                         longitude: currentLocation.lng,
                         is_available: isAvailable
-                    }, currentToken);
+                    });
                 } catch (err) {
                     console.error('Location update error:', err);
                 }
@@ -269,6 +281,28 @@
                     console.error('Check ride error:', err);
                 }
             };
+
+            useEffect(() => {
+                if (!activeRide?.id || !token) return;
+
+                const pollRide = setInterval(async () => {
+                    try {
+                        const data = await apiCall(`/rides/${activeRide.id}/`);
+                        const ride = data.data || data;
+                        setActiveRide(ride);
+
+                        // Return to dashboard if completed/cancelled
+                        if (['completed', 'cancelled'].includes(ride.status.toLowerCase())) {
+                            setActiveRide(null);
+                            loadEarnings(); // refresh earnings
+                        }
+                    } catch (err) {
+                        console.error('Poll error:', err);
+                    }
+                }, 3000);
+
+                return () => clearInterval(pollRide);
+            }, [activeRide?.id, token]);
 
             const loadEarnings = async () => {
                 try {
@@ -489,14 +523,15 @@
                 }
             }, [currentLocation]);
 
-            const getStatusText = () => {
-                if (activeRide) {
-                    switch (activeRide.status.toLowerCase()) {
+            const getStatusText = (status) => {
+                if (!status) return 'Unknown';
+
+                    switch (status.toLowerCase()) {
+                        case 'pending': return 'Finding Driver...';
                         case 'assigned': return 'Ride assigned - Ready to accept';
                         case 'accepted': return 'Ride accepted - Head to pickup';
                         case 'in_progress': return 'On a trip - Ride in progress';
-                        default: return 'Ride in progress';
-                    }
+                        default: return status;
                 }
                 return isAvailable ? 'Available - Waiting for rides' : 'Offline - Not accepting rides';
             };
@@ -508,7 +543,7 @@
                             <div className="flex justify-between items-center">
                                 <div>
                                     <h3 className="font-bold text-lg">Active Ride</h3>
-                                    <p className="text-sm text-gray-600">{getStatusText()}</p>
+                                    <p className="text-sm text-gray-600">{getStatusText(activeRide?.status)}</p>
                                 </div>
                                 <button 
                                     onClick={() => onNavigate('ride')}
@@ -579,6 +614,10 @@
             const mapRef = useRef(null);
             const mapInstanceRef = useRef(null);
             
+            // Safety Check
+            const isInvalidRide = !rideDetails?.status ||
+                ['cancelled', 'completed'].includes(rideDetails.status.toLowerCase());
+
             // Fetch full ride details on mount
             useEffect(() => {
                 const fetchRideDetails = async () => {
@@ -673,8 +712,8 @@
                         setRideDetails(prev => ({ ...prev, ...data }));
                         onUpdate(data);
                     
-                        if (['completed', 'cancelled'].includes(data.status)) {
-                            setTimeout(onComplete, 2000);
+                        if (['completed', 'cancelled'].includes(data.status?.toLowerCase())) {
+                            onComplete();
                         }
                     };
                 
@@ -730,8 +769,11 @@
                 'cancelled': 'Ride Cancelled'
             };
 
-            const getStatusClass = (status) => `status-${status.toLowerCase()}`;
-            
+            const getStatusClass = (status) => {
+                if (!status) return 'status-unknown';
+                return `status-${status.toLowerCase()}`;
+            };
+
             return (
                 <div className="max-w-4xl mx-auto p-4 space-y-4">
                     <div className="card">
@@ -783,9 +825,9 @@
                         {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mt-4">{error}</div>}
                         
                         <div className="mt-6 space-y-3">
-                            {rideDetails.status === 'assigned' && <button onClick={acceptRide} className="btn-success w-full" disabled={loading}>{loading ? 'Accepting...' : '✅ Accept Ride'}</button>}
-                            {rideDetails.status === 'accepted' && <button onClick={startRide} className="btn-warning w-full" disabled={loading}>{loading ? 'Starting...' : '🚀 Start Ride'}</button>}
-                            {rideDetails.status === 'in_progress' && <button onClick={completeRide} className="btn-success w-full" disabled={loading}>{loading ? 'Completing...' : '✅ Complete Ride'}</button>}
+                            {rideDetails.status === 'assigned' && <button onClick={acceptRide} className="btn-success w-full" disabled={loading || isInvalidRide}>{loading ? 'Accepting...' : '✅ Accept Ride'}</button>}
+                            {rideDetails.status === 'accepted' && <button onClick={startRide} className="btn-warning w-full" disabled={loading || isInvalidRide}>{loading ? 'Starting...' : '🚀 Start Ride'}</button>}
+                            {rideDetails.status === 'in_progress' && <button onClick={completeRide} className="btn-success w-full" disabled={loading || isInvalidRide}>{loading ? 'Completing...' : '✅ Complete Ride'}</button>}
                             {!['completed', 'cancelled'].includes(rideDetails.status) && <button onClick={cancelRide} className="btn-danger w-full" disabled={loading}>{loading ? 'Cancelling...' : '❌ Cancel Ride'}</button>}
                         </div>
                     </div>

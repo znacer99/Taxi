@@ -239,7 +239,7 @@
                         ride={activeRide}
                         token={token}
                         apiCall={apiCall}
-                        onUpdate={setActiveRide}
+                        onUpdate={(data) => setActiveRide(prev => ({ ...prev, ...data }))}
                         onComplete={() => {
                             setActiveRide(null);
                             loadRideHistory();
@@ -640,11 +640,15 @@
                     ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
                         console.log('WebSocket update:', data);
+                        console.log('Status check:', data.status, 'Full data:', data);
                         
-                        setRideDetails(prev => ({ ...prev, ...data }));
-                        onUpdate(prev => ({ ...prev, ...data }));
+                        // Extract ride data if nested
+                        const rideData = data.ride || data;
+
+                        setRideDetails(prev => ({ ...prev, ...rideData }));
+                        onUpdate(rideData);
                         
-                        if (['completed', 'cancelled'].includes(data.status)) {
+                        if (['completed', 'cancelled'].includes(rideData.status)) {
                             setTimeout(() => {
                                 onComplete();
                             }, 2000);
