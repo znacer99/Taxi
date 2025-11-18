@@ -188,25 +188,31 @@ export const api = {
  */
 export const authApi = {
   login: async (username, password) => {
-    const response = await api.post('/api/auth/login/', { username, password });
-    if (response.success && response.data.access) {
-      await setAuthToken(response.data.access);
+    const response = await api.post('/api/token/', { username, password });
+    // Django JWT returns access token directly, not in standardized format
+    if (response.access) {
+      await setAuthToken(response.access);
+      return { success: true, data: response };
     }
     return response;
   },
   
   registerPassenger: async (userData) => {
-    const response = await api.post('/api/auth/register/passenger/', userData);
-    if (response.success && response.data.access) {
-      await setAuthToken(response.data.access);
+    const response = await api.post('/api/register/passenger/', userData);
+    // Registration returns tokens directly
+    if (response.access) {
+      await setAuthToken(response.access);
+      return { success: true, data: response };
     }
     return response;
   },
   
   registerDriver: async (userData) => {
-    const response = await api.post('/api/auth/register/driver/', userData);
-    if (response.success && response.data.access) {
-      await setAuthToken(response.data.access);
+    const response = await api.post('/api/register/driver/', userData);
+    // Registration returns tokens directly
+    if (response.access) {
+      await setAuthToken(response.access);
+      return { success: true, data: response };
     }
     return response;
   },

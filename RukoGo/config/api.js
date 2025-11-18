@@ -47,10 +47,10 @@ export const WS_BASE_URL = getWebSocketUrl();
 // API Endpoints
 export const API_ENDPOINTS = {
   // Authentication
-  LOGIN: '/api/auth/login/',
-  REGISTER_PASSENGER: '/api/auth/register/passenger/',
-  REGISTER_DRIVER: '/api/auth/register/driver/',
-  LOGOUT: '/api/auth/logout/',
+  LOGIN: '/api/token/',
+  REGISTER_PASSENGER: '/api/register/passenger/',
+  REGISTER_DRIVER: '/api/register/driver/',
+  LOGOUT: '/api/logout/',
   
   // Rides
   RIDES: '/api/rides/',
