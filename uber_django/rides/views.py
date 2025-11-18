@@ -78,10 +78,12 @@ class RideViewSet(viewsets.ModelViewSet):
         # Filter by status if provided
         status_filter = self.request.query_params.get('status')
         if status_filter:
-            valid_statuses = ['requested', 'assigned', 'accepted', 'on_the_way', 'in_progress', 'completed', 'cancelled']
-            if status_filter not in valid_statuses:
+            # Accept both lowercase and uppercase, normalize to uppercase for DB
+            status_upper = status_filter.upper()
+            valid_statuses = ['REQUESTED', 'ASSIGNED', 'ACCEPTED', 'ON_THE_WAY', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']
+            if status_upper not in valid_statuses:
                 raise ValidationError(f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
-            queryset = queryset.filter(status=status_filter)
+            queryset = queryset.filter(status=status_upper)
 
         # Sort by newest first
         queryset = queryset.order_by('-requested_at')
@@ -165,7 +167,7 @@ class RideViewSet(viewsets.ModelViewSet):
             ride.driver = nearest_driver
             nearest_driver.is_available = False
             nearest_driver.save()
-            ride.status = "assigned"
+            ride.status = "ASSIGNED"
             ride.save()
             
             print(f" Sending to driver_{nearest_driver.id}")
@@ -184,7 +186,7 @@ class RideViewSet(viewsets.ModelViewSet):
             send_websocket_update(
                 ride.id,
                 'no_driver',
-                {'status': 'requested', 'message': 'No drivers available'}
+                {'status': 'REQUESTED', 'message': 'No drivers available'}
             )
         return ride
 
@@ -256,7 +258,7 @@ class RideViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only drivers can accept rides")
 
         # Validate ride state
-        if ride.status != "assigned":
+        if ride.status != "ASSIGNED":
             raise ValidationError(
                 f"Ride cannot be accepted. Current status: {ride.status}"
             )
@@ -264,13 +266,13 @@ class RideViewSet(viewsets.ModelViewSet):
         if ride.driver != driver_profile:
             raise PermissionDenied("This ride is not assigned to you")
 
-        ride.status = "accepted"
+        ride.status = "ACCEPTED"
         ride.save()
 
         send_websocket_update(
             ride.id,
             'ride_accepted',
-            {'status': 'accepted'}
+            {'status': 'ACCEPTED'}
         )
 
         return Response(
@@ -296,18 +298,18 @@ class RideViewSet(viewsets.ModelViewSet):
         if ride.driver != driver_profile:
             raise PermissionDenied("This ride is not assigned to you")
 
-        if ride.status != "accepted":
+        if ride.status != "ACCEPTED":
             raise ValidationError(
                 f"Ride must be accepted first. Current status: {ride.status}"
             )
 
-        ride.status = "in_progress"
+        ride.status = "IN_PROGRESS"
         ride.save()
 
         send_websocket_update(
             ride.id,
             'ride_started',
-            {'status': 'in_progress'}
+            {'status': 'IN_PROGRESS'}
         )
 
         return Response(
@@ -333,7 +335,7 @@ class RideViewSet(viewsets.ModelViewSet):
         if ride.driver != driver_profile:
             raise PermissionDenied("This ride is not assigned to you")
 
-        if ride.status != "in_progress":
+        if ride.status != "IN_PROGRESS":
             raise ValidationError(
                 f"Ride must be in progress. Current status: {ride.status}"
             )
@@ -348,7 +350,7 @@ class RideViewSet(viewsets.ModelViewSet):
         amount = round(5.0 + (distance * 1.5), 2)
 
         # Update ride
-        ride.status = "completed"
+        ride.status = "COMPLETED"
         ride.completed_at = timezone.now()
         ride.fare = amount
         ride.save()
@@ -369,7 +371,7 @@ class RideViewSet(viewsets.ModelViewSet):
             ride.id,
             'ride_completed',
             {
-                'status': 'completed',
+                'status': 'COMPLETED',
                 'distance_km': round(distance, 2),
                 'amount': amount
             }
@@ -401,12 +403,12 @@ class RideViewSet(viewsets.ModelViewSet):
         if not (is_passenger or is_driver):
             raise PermissionDenied("You are not authorized to cancel this ride")
 
-        if ride.status in ["completed", "cancelled"]:
+        if ride.status in ["COMPLETED", "CANCELLED"]:
             raise ValidationError(
                 f"Cannot cancel ride with status: {ride.status}"
             )
 
-        ride.status = "cancelled"
+        ride.status = "CANCELLED"
         ride.save()
 
         # Free up driver if assigned
@@ -426,7 +428,7 @@ class RideViewSet(viewsets.ModelViewSet):
         send_websocket_update(
             ride.id,
             'ride_cancelled',
-            {'status': 'cancelled'}
+            {'status': 'CANCELLED'}
         )
 
         return Response(
@@ -449,7 +451,7 @@ class RideViewSet(viewsets.ModelViewSet):
 
         completed_rides = Ride.objects.filter(
             driver=driver_profile,
-            status="completed"
+            status="COMPLETED"
         )
 
         total_earnings = Payment.objects.filter(

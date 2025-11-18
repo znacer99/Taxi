@@ -82,7 +82,7 @@ class DriverConsumer(AsyncWebsocketConsumer):
     def get_current_ride(self):
         return Ride.objects.filter(
             driver_id=self.driver_id,
-            status__in=['ASSIGNED', 'PICKED_UP']
+            status__in=['ASSIGNED', 'ACCEPTED', 'IN_PROGRESS']
         ).first()
 
     async def disconnect(self, close_code):
