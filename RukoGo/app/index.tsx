@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { View, TouchableOpacity, Text, StyleSheet } from 'react-native';
-import DriverApp from '../DriverApp';
-import PassengerApp from '../PassengerApp';
+import DriverApp from '../DriverApp.simple';
+import PassengerApp from '../PassengerApp.simple';
 
 export default function Page() {
   const [mode, setMode] = useState(null);

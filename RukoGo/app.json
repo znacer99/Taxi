@@ -27,6 +27,13 @@
     },
     "plugins": [
       "expo-router",
+      "react-native-maps",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow RukoGo to use your location for ride tracking."
+        }
+      ],
       [
         "expo-splash-screen",
         {
