@@ -45,7 +45,7 @@
       "reactCompiler": true
     },
     "extra": {
-      "apiUrl": "http://localhost:8000"
+      "apiUrl": "https://8000--019a96d3-b3a0-7638-8756-3147d29de32d.eu-central-1-01.gitpod.dev"
     }
   }
 }
