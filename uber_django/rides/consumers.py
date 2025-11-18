@@ -55,6 +55,29 @@ class DriverConsumer(AsyncWebsocketConsumer):
         self.driver_id = self.scope['url_route']['kwargs']['driver_id']
         self.room_group_name = f'driver_{self.driver_id}'
 
+        # Authenticate token from query string
+        query_string = self.scope['query_string'].decode()
+        token = query_string.split("token=")[-1] if "token=" in query_string else None
+        
+        if not token:
+            await self.close(code=4001)
+            return
+            
+        self.user = await self.authenticate_token(token)
+        if not self.user:
+            await self.close(code=4001)
+            return
+        
+        # Verify user is a driver and owns this driver_id
+        try:
+            driver_profile = await sync_to_async(lambda: self.user.driver_profile)()
+            if str(driver_profile.id) != str(self.driver_id):
+                await self.close(code=4003)  # Forbidden
+                return
+        except Exception:
+            await self.close(code=4003)
+            return
+
         await self.channel_layer.group_add(
             self.room_group_name,
             self.channel_name
@@ -82,8 +105,19 @@ class DriverConsumer(AsyncWebsocketConsumer):
     def get_current_ride(self):
         return Ride.objects.filter(
             driver_id=self.driver_id,
-            status__in=['ASSIGNED', 'PICKED_UP']
+            status__in=['ASSIGNED', 'ACCEPTED', 'IN_PROGRESS']
         ).first()
+
+    @database_sync_to_async
+    def authenticate_token(self, token):
+        try:
+            UntypedToken(token)  # Raises if invalid/expired
+            jwt_auth = JWTAuthentication()
+            validated_token = jwt_auth.get_validated_token(token)
+            user = jwt_auth.get_user(validated_token)
+            return user
+        except (DecodeError, ExpiredSignatureError):
+            return None
 
     async def disconnect(self, close_code):
         await self.channel_layer.group_discard(
