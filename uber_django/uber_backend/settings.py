@@ -27,7 +27,13 @@ SECRET_KEY = 'django-insecure-vc3td9!96)r50b^**@pf)3!_3l-scvt*mig_9x83vrx5&!$xx9
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'testserver']
+ALLOWED_HOSTS = [
+    '127.0.0.1', 
+    'localhost', 
+    'testserver',
+    '8000--019a96d3-b3a0-7638-8756-3147d29de32d.eu-central-1-01.gitpod.dev',
+    '.gitpod.io',  # Allow all Gitpod URLs
+]
 
 
 # Application definition
