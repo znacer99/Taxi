@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
 from math import radians, cos, sin, asin, sqrt
 from django.utils import timezone
-from django.db import models
+from django.db import models, transaction
 from django.core.paginator import Paginator
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
@@ -151,47 +151,50 @@ class RideViewSet(viewsets.ModelViewSet):
     
     
     def _perform_create_with_matching(self, serializer):
-        """Create ride and auto-match nearest driver"""
+        """Create ride and auto-match nearest driver with database locking"""
         ride = serializer.save()
         
-        # Find nearest available driver
-        nearest_driver = self._find_nearest_driver(
-            ride.pickup_lat,
-            ride.pickup_lng
-        )
-        
-        if nearest_driver:
-            # Assign driver
-            ride.driver = nearest_driver
-            nearest_driver.is_available = False
-            nearest_driver.save()
-            ride.status = "assigned"
-            ride.save()
+        # Use atomic transaction with row-level locking to prevent race conditions
+        with transaction.atomic():
+            # Find and lock nearest available driver
+            nearest_driver = self._find_and_lock_nearest_driver(
+                ride.pickup_lat,
+                ride.pickup_lng
+            )
             
-            print(f" Sending to driver_{nearest_driver.id}")
-            # Broadcast to the specific driver via WebSocket
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                f"driver_{nearest_driver.id}",  # Only assigned driver
-                {
-                    "type": "ride_update",
-                    "ride": RideSerializer(ride).data,
+            if nearest_driver:
+                # Assign driver atomically
+                ride.driver = nearest_driver
+                nearest_driver.is_available = False
+                nearest_driver.save()
+                ride.status = "ASSIGNED"
+                ride.save()
+                
+                print(f" Sending to driver_{nearest_driver.id}")
+                # Broadcast to the specific driver via WebSocket
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"driver_{nearest_driver.id}",  # Only assigned driver
+                    {
+                        "type": "ride_update",
+                        "ride": RideSerializer(ride).data,
                     }
-            )
-            print(f" Sent to driver_{nearest_driver.id}")
-        else:
-            # No driver available, keep in requested state
-            send_websocket_update(
-                ride.id,
-                'no_driver',
-                {'status': 'requested', 'message': 'No drivers available'}
-            )
+                )
+                print(f" Sent to driver_{nearest_driver.id}")
+            else:
+                # No driver available, keep in requested state
+                send_websocket_update(
+                    ride.id,
+                    'no_driver',
+                    {'status': 'REQUESTED', 'message': 'No drivers available'}
+                )
         return ride
 
 
-    def _find_nearest_driver(self, pickup_lat, pickup_lng):
-        """Find nearest available driver using Haversine"""
-        available_drivers = DriverProfile.objects.filter(
+    def _find_and_lock_nearest_driver(self, pickup_lat, pickup_lng):
+        """Find nearest available driver using Haversine with row-level locking"""
+        # Use select_for_update() to lock rows and prevent race conditions
+        available_drivers = DriverProfile.objects.select_for_update().filter(
             is_available=True,
             latitude__isnull=False,
             longitude__isnull=False
@@ -348,18 +351,27 @@ class RideViewSet(viewsets.ModelViewSet):
         amount = round(5.0 + (distance * 1.5), 2)
 
         # Update ride
-        ride.status = "completed"
+        ride.status = "COMPLETED"
         ride.completed_at = timezone.now()
         ride.fare = amount
         ride.save()
 
-        # Create payment
-        payment = Payment.objects.create(
+        # Create or get payment (prevent duplicates)
+        payment, created = Payment.objects.get_or_create(
             ride=ride,
-            amount=amount,
-            payment_status="completed",
-            paid_at=timezone.now()
+            defaults={
+                'amount': amount,
+                'payment_status': "completed",
+                'paid_at': timezone.now()
+            }
         )
+        
+        # If payment already existed, update it
+        if not created:
+            payment.amount = amount
+            payment.payment_status = "completed"
+            payment.paid_at = timezone.now()
+            payment.save()
 
         # Free up driver
         driver_profile.is_available = True
@@ -369,7 +381,7 @@ class RideViewSet(viewsets.ModelViewSet):
             ride.id,
             'ride_completed',
             {
-                'status': 'completed',
+                'status': 'COMPLETED',
                 'distance_km': round(distance, 2),
                 'amount': amount
             }

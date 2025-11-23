@@ -99,14 +99,6 @@ class RideSerializer(serializers.ModelSerializer):
     passenger = PassengerProfileSerializer(read_only=True)
     driver = DriverProfileSerializer(read_only=True)
     payment = serializers.SerializerMethodField(read_only=True)
-    
-    # Write-only fields for creation
-    pickup_lat = serializers.FloatField(write_only=True, required=True, validators=[validate_latitude])
-    pickup_lng = serializers.FloatField(write_only=True, required=True, validators=[validate_longitude])
-    dropoff_lat = serializers.FloatField(write_only=True, required=True, validators=[validate_latitude])
-    dropoff_lng = serializers.FloatField(write_only=True, required=True, validators=[validate_longitude])
-    pickup_location = serializers.CharField(write_only=True, required=True, validators=[validate_non_empty_string])
-    dropoff_location = serializers.CharField(write_only=True, required=True, validators=[validate_non_empty_string])
 
     class Meta:
         model = Ride
@@ -116,6 +108,24 @@ class RideSerializer(serializers.ModelSerializer):
             'requested_at', 'completed_at', 'payment'
         ]
         read_only_fields = ['id', 'passenger', 'driver', 'status', 'fare', 'requested_at', 'completed_at', 'payment']
+    
+    def validate_pickup_lat(self, value):
+        return validate_latitude(value)
+    
+    def validate_pickup_lng(self, value):
+        return validate_longitude(value)
+    
+    def validate_dropoff_lat(self, value):
+        return validate_latitude(value)
+    
+    def validate_dropoff_lng(self, value):
+        return validate_longitude(value)
+    
+    def validate_pickup_location(self, value):
+        return validate_non_empty_string(value)
+    
+    def validate_dropoff_location(self, value):
+        return validate_non_empty_string(value)
 
     def get_payment(self, obj):
         """Get payment details if ride is completed"""
@@ -127,6 +137,8 @@ class RideSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         """Cross-field validation"""
+        from math import radians, cos, sin, asin, sqrt
+        
         pickup_lat = data.get('pickup_lat')
         pickup_lng = data.get('pickup_lng')
         dropoff_lat = data.get('dropoff_lat')
@@ -138,23 +150,34 @@ class RideSerializer(serializers.ModelSerializer):
                 "Pickup and dropoff locations cannot be the same"
             )
 
+        # Calculate distance using Haversine formula
+        R = 6371  # Earth's radius in km
+        dlat = radians(dropoff_lat - pickup_lat)
+        dlon = radians(dropoff_lng - pickup_lng)
+        a = sin(dlat/2)**2 + cos(radians(pickup_lat)) * cos(radians(dropoff_lat)) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        distance = R * c
+
+        # Validate maximum distance (500 km)
+        if distance > 500:
+            raise serializers.ValidationError(
+                f"Ride distance ({distance:.1f} km) exceeds maximum allowed distance (500 km)"
+            )
+
+        # Validate minimum distance (0.1 km = 100 meters)
+        if distance < 0.1:
+            raise serializers.ValidationError(
+                f"Ride distance ({distance:.1f} km) is too short. Minimum distance is 0.1 km"
+            )
+
         return data
 
     def create(self, validated_data):
         """Create ride with validated data"""
-        pickup_lat = validated_data.pop('pickup_lat')
-        pickup_lng = validated_data.pop('pickup_lng')
-        dropoff_lat = validated_data.pop('dropoff_lat')
-        dropoff_lng = validated_data.pop('dropoff_lng')
-
         passenger_profile = self.context['request'].user.passenger_profile
 
         ride = Ride.objects.create(
             passenger=passenger_profile,
-            pickup_lat=pickup_lat,
-            pickup_lng=pickup_lng,
-            dropoff_lat=dropoff_lat,
-            dropoff_lng=dropoff_lng,
             **validated_data
         )
         return ride
